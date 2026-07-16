@@ -143,6 +143,13 @@ message SessionState {
   bool orphaned = 2;
   string tunnel_name = 3;
   repeated ChildHandle children = 4;
+  // Whether the app is holding a connection right now. Distinct from routing_active:
+  // the tunnel can be up while the app is gone, which is the whole point of orphaned
+  // sessions, and the module's web ui has to show those two facts separately.
+  bool app_connected = 5;
+  // Bytes matched by the tproxy mark rule, so a status page does not need a second
+  // round trip for the one number worth showing.
+  uint64 tproxy_mark_bytes = 6;
 }
 
 // Only binaries the daemon recognises may be started; the app names one rather than

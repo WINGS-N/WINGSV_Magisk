@@ -20,3 +20,4 @@ set_perm "$MODPATH/service.sh" 0 0 0755
 set_perm "$MODPATH/uninstall.sh" 0 0 0755
 
 ui_print "- Installed. Reboot, then check Settings > Root in WINGS V."
+ui_print "  KernelSU / APatch: the module's Web UI shows status and can stop the tunnel."

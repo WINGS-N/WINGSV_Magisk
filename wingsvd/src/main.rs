@@ -12,10 +12,13 @@
 //!     uid, which the kernel fills in and a caller cannot forge;
 //!   * the uid is resolved per connection from the package database, because it
 //!     changes whenever the app is reinstalled;
+//!   * root is accepted too - that is the module's own web ui and CLI talking to us,
+//!     and a uid that can already rewrite our binary gains nothing from the socket;
 //!   * the daemon never runs a string it was handed: routing is rebuilt from a typed
 //!     spec, and only binaries inside the app's native library dir may be exec'd.
 
 mod children;
+mod cli;
 mod packages;
 mod routing;
 mod wire;
@@ -34,6 +37,8 @@ use rootd::{
     SessionState,
 };
 use std::io;
+use std::sync::{Arc, Mutex};
+use std::thread;
 // std gates the abstract-socket extension on target_os, so the same trait lives under
 // two names even though the kernel behaviour is identical. The daemon only ever ships
 // for Android; the linux arm exists so it still builds - and so clippy still runs - on
@@ -45,7 +50,7 @@ use std::os::linux::net::SocketAddrExt;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
 
-const SOCKET_NAME: &str = "wings.v.rootd";
+pub const SOCKET_NAME: &str = "wings.v.rootd";
 const APP_PACKAGE: &str = "wings.v";
 const PROTOCOL_VERSION: u32 = 1;
 /// Oldest client we still speak to. Moves only when semantics change, never when a
@@ -62,9 +67,19 @@ struct Session {
     spec: Option<RoutingSpec>,
     orphaned: bool,
     children: Children,
+    /// How many app-uid clients are connected. The web ui shows "app connected"
+    /// separately from "routing active", because the two really do come apart.
+    app_clients: u32,
 }
 
 fn main() {
+    // `wingsvd status` / `wingsvd stop` are the module's web ui talking to a daemon
+    // that is already running; only a bare `wingsvd` is the daemon itself.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(command) = args.first() {
+        std::process::exit(cli::run(command));
+    }
+
     let addr = match SocketAddr::from_abstract_name(SOCKET_NAME) {
         Ok(addr) => addr,
         Err(error) => {
@@ -83,19 +98,23 @@ fn main() {
     };
     eprintln!("wingsvd {MODULE_VERSION} listening on @{SOCKET_NAME}");
 
-    let mut session = Session::default();
+    // A thread per client, not a serial loop: the app holds its connection open for the
+    // life of the tunnel, so anything serial would leave the web ui waiting forever for
+    // a turn that never comes. The lock is taken per request, never across a read.
+    let session = Arc::new(Mutex::new(Session::default()));
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => serve(stream, &mut session),
+            Ok(stream) => {
+                let session = Arc::clone(&session);
+                thread::spawn(move || serve(stream, &session));
+            }
             Err(error) => eprintln!("wingsvd: accept: {error}"),
         }
     }
 }
 
-/// Serves one client to completion. Connections are handled one at a time on purpose:
-/// there is exactly one session, and a lock-free single thread is easier to be sure
-/// about than concurrent mutation of routing state.
-fn serve(stream: UnixStream, session: &mut Session) {
+/// Serves one client to completion.
+fn serve(stream: UnixStream, session: &Mutex<Session>) {
     let uid = match peer_uid(&stream) {
         Ok(uid) => uid,
         Err(error) => {
@@ -103,21 +122,22 @@ fn serve(stream: UnixStream, session: &mut Session) {
             return;
         }
     };
-    match packages::app_uid(APP_PACKAGE) {
-        Some(expected) if expected == uid => {}
-        Some(expected) => {
-            eprintln!("wingsvd: rejected uid={uid} (expected {expected})");
-            return;
-        }
-        None => {
-            eprintln!("wingsvd: rejected uid={uid}: {APP_PACKAGE} not installed");
-            return;
-        }
+    let app_uid = packages::app_uid(APP_PACKAGE);
+    let is_app = Some(uid) == app_uid;
+    // Root is the module's own web ui / CLI. It could edit our files anyway, so the
+    // socket is not what keeps it out; everyone else is refused.
+    if !is_app && uid != 0 {
+        eprintln!("wingsvd: rejected uid={uid} (app is {app_uid:?})");
+        return;
     }
 
-    if session.spec.is_some() {
-        // Someone is back for a session that outlived its owner.
-        session.orphaned = false;
+    if is_app {
+        let mut session = session.lock().unwrap();
+        session.app_clients += 1;
+        if session.spec.is_some() {
+            // The app is back for a session that outlived it.
+            session.orphaned = false;
+        }
     }
 
     loop {
@@ -155,13 +175,22 @@ fn serve(stream: UnixStream, session: &mut Session) {
         }
     }
 
-    if session.spec.is_some() {
+    if !is_app {
+        return;
+    }
+    let mut session = session.lock().unwrap();
+    session.app_clients = session.app_clients.saturating_sub(1);
+    if session.app_clients == 0 && session.spec.is_some() {
         session.orphaned = true;
-        eprintln!("wingsvd: client gone, keeping the session (orphaned)");
+        eprintln!("wingsvd: app gone, keeping the session (orphaned)");
     }
 }
 
-fn dispatch(envelope: ClientEnvelope, session: &mut Session) -> Result<Payload, String> {
+fn dispatch(envelope: ClientEnvelope, session: &Mutex<Session>) -> Result<Payload, String> {
+    // Locked per request rather than for the life of the connection: the app keeps its
+    // connection open indefinitely, and holding the lock that long would block the web
+    // ui from ever reading the status.
+    let session = &mut *session.lock().unwrap();
     let command = envelope
         .command
         .ok_or_else(|| "empty command".to_string())?;
@@ -201,16 +230,26 @@ fn dispatch(envelope: ClientEnvelope, session: &mut Session) -> Result<Payload, 
             session.orphaned = false;
             Ok(Payload::Ack(Ack {}))
         }
-        ClientCommand::SessionState(_) => Ok(Payload::SessionState(SessionState {
-            routing_active: session.spec.is_some(),
-            orphaned: session.orphaned,
-            tunnel_name: session
+        ClientCommand::SessionState(_) => {
+            let tproxy_mark_bytes = session
                 .spec
                 .as_ref()
-                .map(|spec| spec.tunnel_name.clone())
-                .unwrap_or_default(),
-            children: session.children.snapshot(),
-        })),
+                .and_then(|spec| spec.tproxy.as_ref())
+                .map(|tproxy| routing::read_tproxy_mark_bytes(&tproxy.mark_chains))
+                .unwrap_or(0);
+            Ok(Payload::SessionState(SessionState {
+                routing_active: session.spec.is_some(),
+                orphaned: session.orphaned,
+                tunnel_name: session
+                    .spec
+                    .as_ref()
+                    .map(|spec| spec.tunnel_name.clone())
+                    .unwrap_or_default(),
+                children: session.children.snapshot(),
+                app_connected: session.app_clients > 0,
+                tproxy_mark_bytes,
+            }))
+        }
         ClientCommand::SpawnChild(command) => {
             let handle = session.children.spawn(
                 command.kind,

@@ -47,6 +47,9 @@ done
 
 cp "$HERE/module.prop" "$HERE/service.sh" "$HERE/uninstall.sh" "$HERE/customize.sh" "$STAGE/"
 chmod 755 "$STAGE/service.sh" "$STAGE/uninstall.sh" "$STAGE/customize.sh"
+# webroot/ is what KernelSU Next and APatch render as the module's page; managers that
+# have no web ui simply ignore it.
+cp -r "$HERE/webroot" "$STAGE/webroot"
 
 mkdir -p "$OUTDIR"
 ZIP="$OUTDIR/wingsv-root-module.zip"

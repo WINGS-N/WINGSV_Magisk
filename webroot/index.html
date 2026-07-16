@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>WINGS V root helper</title>
+    <style>
+      /* Palette lifted from WINGS V DeX (frontend/tailwind.config.js) so the module's
+         page reads as part of the same product: pure-black canvas, no gradients,
+         mirroring Samsung Account. Dark only - DeX has no light theme.
+         The Samsung faces are named but not shipped: they exist on the Samsung devices
+         this targets, and everywhere else the stack falls through to the system font
+         rather than dragging font files into a root module. */
+      :root {
+        color-scheme: dark;
+        --page: #000000;
+        --text: #fbfbfb;
+        --card: #1c1c1e;
+        --surface: #242427;
+        --border: rgba(255, 255, 255, 0.06);
+        --divider: rgba(255, 255, 255, 0.08);
+        --muted: rgba(252, 252, 252, 0.62);
+        --kicker: rgba(252, 252, 252, 0.55);
+        --accent: #1259d1;
+        --accent-hover: #1063e6;
+        --secondary: rgba(255, 255, 255, 0.08);
+        --badge-bg: rgba(140, 168, 255, 0.14);
+        --badge-text: #b7c8ff;
+        --danger: #ff7a8c;
+        --card-shadow: 0 16px 60px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+      }
+      * { box-sizing: border-box; }
+      html, body { background: var(--page); }
+      body {
+        margin: 0;
+        padding: max(20px, env(safe-area-inset-top)) 16px max(20px, env(safe-area-inset-bottom));
+        color: var(--text);
+        font-family: "SamsungOne", "Segoe UI", Roboto, sans-serif;
+        font-size: 15px;
+        line-height: 1.45;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .kicker {
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--kicker);
+        margin: 0 4px 6px;
+      }
+      h1 {
+        font-family: "SamsungSharpSans", "SamsungOne", sans-serif;
+        font-weight: 700;
+        font-size: 24px;
+        letter-spacing: -0.01em;
+        margin: 0 4px 18px;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 26px;
+        box-shadow: var(--card-shadow);
+        padding: 6px 18px;
+        margin-bottom: 14px;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        padding: 13px 0;
+      }
+      .row + .row { border-top: 1px solid var(--divider); }
+      .k { color: var(--muted); }
+      .v { font-weight: 700; text-align: right; word-break: break-word; }
+      .dot {
+        display: inline-block;
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        margin-right: 8px;
+        vertical-align: 1px;
+      }
+      .ok { color: var(--badge-text); } .ok .dot { background: #3ddc97; }
+      .warn { color: #ffd479; } .warn .dot { background: #ffd479; }
+      .off { color: var(--muted); } .off .dot { background: rgba(252, 252, 252, 0.35); }
+      .actions { padding: 16px 0 4px; }
+      button {
+        width: 100%;
+        padding: 14px;
+        font-family: inherit;
+        font-size: 15px;
+        font-weight: 700;
+        color: var(--text);
+        background: var(--accent);
+        border: 0;
+        border-radius: 26px;
+        cursor: pointer;
+        transition: background 0.15s ease, opacity 0.15s ease;
+      }
+      button:active { background: var(--accent-hover); }
+      button:disabled { opacity: 0.38; cursor: default; }
+      button.secondary { background: var(--secondary); }
+      button.danger { background: transparent; color: var(--danger); border: 1px solid var(--border); }
+      .hint { color: var(--muted); font-size: 13px; margin: 10px 4px 14px; }
+      .err {
+        color: var(--danger);
+        font-size: 13px;
+        margin: 0 0 14px;
+        padding: 12px 14px;
+        background: var(--surface);
+        border-radius: 16px;
+        white-space: pre-wrap;
+      }
+      .badge {
+        display: inline-block;
+        padding: 3px 10px;
+        border-radius: 999px;
+        background: var(--badge-bg);
+        color: var(--badge-text);
+        font-size: 12px;
+        font-weight: 700;
+      }
+    </style>
+  </head>
+  <body>
+    <p class="kicker">WINGS V</p>
+    <h1>Root helper</h1>
+
+    <div class="card">
+      <div class="row"><span class="k">Daemon</span><span class="v" id="daemon">…</span></div>
+      <div class="row"><span class="k">Tunnel</span><span class="v" id="tunnel">…</span></div>
+      <div class="row"><span class="k">App</span><span class="v" id="app">…</span></div>
+      <div class="row"><span class="k">Proxied</span><span class="v" id="bytes">…</span></div>
+      <div class="row"><span class="k">Children</span><span class="v" id="children">…</span></div>
+    </div>
+
+    <div class="err" id="err" hidden></div>
+
+    <div class="actions">
+      <button id="stop" disabled>Stop the tunnel</button>
+      <p class="hint" id="stophint">Removes the routing this module installed. The app can start it again.</p>
+      <button id="disable" class="danger">Disable the module</button>
+      <p class="hint">Takes effect after a reboot. The app then handles routing itself, exactly as it does without the module.</p>
+    </div>
+
+    <script>
+      const MODDIR = "/data/adb/modules/wingsv_rootd";
+      const $ = (id) => document.getElementById(id);
+
+      // KernelSU hands the page a shell and nothing else, so every call goes through
+      // the daemon's own `wingsvd status|stop`. That CLI is a client of the running
+      // daemon, not a second source of truth.
+      async function sh(cmd) {
+        if (typeof ksu === "undefined" || !ksu.exec) {
+          throw new Error("this page needs the KernelSU / APatch web ui");
+        }
+        const { errno, stdout, stderr } = await ksu.exec(cmd, {});
+        if (errno !== 0 && !stdout) throw new Error(stderr || `exit ${errno}`);
+        return stdout;
+      }
+
+      // The zip carries both ABIs; ask the device which one it runs.
+      let daemonPath = null;
+      async function daemon() {
+        if (daemonPath) return daemonPath;
+        const abi = (await sh("getprop ro.product.cpu.abi")).trim();
+        const dir = abi.startsWith("arm64") ? "arm64-v8a" : "armeabi-v7a";
+        daemonPath = `${MODDIR}/bin/${dir}/wingsvd`;
+        return daemonPath;
+      }
+
+      function human(bytes) {
+        if (!bytes) return "0 B";
+        const units = ["B", "KB", "MB", "GB", "TB"];
+        let i = 0;
+        let value = bytes;
+        while (value >= 1024 && i < units.length - 1) { value /= 1024; i++; }
+        return `${value < 10 && i > 0 ? value.toFixed(1) : Math.round(value)} ${units[i]}`;
+      }
+
+      function mark(el, cls, text) {
+        el.className = "v " + cls;
+        el.innerHTML = `<span class="dot"></span>${text}`;
+      }
+
+      function fail(text) {
+        $("err").hidden = false;
+        $("err").textContent = text;
+      }
+
+      async function refresh() {
+        try {
+          const s = JSON.parse(await sh(`${await daemon()} status`));
+
+          if (!s.running) {
+            mark($("daemon"), "off", "not running");
+            mark($("tunnel"), "off", "-");
+            mark($("app"), "off", "-");
+            $("bytes").textContent = "-";
+            $("children").textContent = "-";
+            $("stop").disabled = true;
+            fail(s.error || "the daemon is not answering");
+            return;
+          }
+          $("err").hidden = true;
+
+          mark($("daemon"), "ok", `running <span class="badge">v${s.version}</span>`);
+          if (s.tunnel) {
+            // Orphaned is not an error: the tunnel deliberately outlives an app the
+            // system killed, so it gets said plainly rather than dressed as a fault.
+            const name = s.tunnel_name ? ` (${s.tunnel_name})` : "";
+            mark($("tunnel"), s.orphaned ? "warn" : "ok", s.orphaned ? `up, app gone${name}` : `up${name}`);
+          } else {
+            mark($("tunnel"), "off", "down");
+          }
+          mark($("app"), s.app_connected ? "ok" : "off", s.app_connected ? "connected" : "not connected");
+          $("bytes").textContent = s.tproxy_bytes ? human(s.tproxy_bytes) : "-";
+          const alive = (s.children || []).filter((c) => c.running).length;
+          $("children").textContent = alive ? `${alive} running` : "none";
+          $("stop").disabled = !s.tunnel;
+        } catch (error) {
+          fail(String(error.message || error));
+        }
+      }
+
+      $("stop").addEventListener("click", async () => {
+        $("stop").disabled = true;
+        try {
+          await sh(`${await daemon()} stop`);
+        } catch (error) {
+          fail(String(error.message || error));
+        }
+        refresh();
+      });
+
+      $("disable").addEventListener("click", async () => {
+        try {
+          // `disable` is the manager's own convention, so the module stays off across
+          // reboots until it is re-enabled from the manager.
+          await sh(`touch ${MODDIR}/disable && pkill -f '/wingsvd$' || true`);
+          $("stophint").textContent = "Module disabled. Reboot to finish.";
+          refresh();
+        } catch (error) {
+          fail(String(error.message || error));
+        }
+      });
+
+      refresh();
+      setInterval(refresh, 2000);
+    </script>
+  </body>
+</html>
