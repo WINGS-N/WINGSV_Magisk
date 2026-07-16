@@ -1,25 +1,22 @@
 #!/usr/bin/env bash
 # Builds the flashable root-helper zip: wingsvd for both ABIs plus the module scripts.
 #
-# Deliberately not a Gradle task in :app. The daemon does not ship inside the APK - it
-# ships in this zip - so wiring it into the app's build would couple the app to
-# something it does not depend on, and would drag the Rust toolchain into every
-# assembleDebug.
+# Needs: rustup targets aarch64-linux-android + armv7-linux-androideabi, cargo-ndk, and
+# an NDK. The NDK is taken from ANDROID_NDK_HOME, else ANDROID_HOME/ANDROID_SDK_ROOT,
+# else the sdk.dir of the WINGS V checkout when this repo sits inside it as a submodule.
 #
-# Needs: rustup targets aarch64-linux-android + armv7-linux-androideabi, cargo-ndk,
-# and an NDK (ANDROID_NDK_HOME, else read from local.properties sdk.dir).
-#
-# Usage: module/build-module.sh [outdir]   (default: dist/)
+# Usage: ./build-module.sh [outdir]   (default: dist/ beside this script)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$HERE/.." && pwd)"
-OUTDIR="$(cd "${1:-$ROOT/dist}" 2>/dev/null && pwd || { mkdir -p "${1:-$ROOT/dist}" && cd "${1:-$ROOT/dist}" && pwd; })"
+OUTDIR="$(cd "${1:-$HERE/dist}" 2>/dev/null && pwd || { mkdir -p "${1:-$HERE/dist}" && cd "${1:-$HERE/dist}" && pwd; })"
 PLATFORM=29
 
 if [ -z "${ANDROID_NDK_HOME:-}" ]; then
-  sdk="$(sed -n 's/^sdk.dir=//p' "$ROOT/local.properties" 2>/dev/null || true)"
-  [ -n "$sdk" ] || sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+  sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+  # As a submodule the checkout lives at <app>/external/WINGSV_Magisk, so the app's
+  # local.properties is two levels up; standalone this simply finds nothing.
+  [ -n "$sdk" ] || sdk="$(sed -n 's/^sdk.dir=//p' "$HERE/../../local.properties" 2>/dev/null || true)"
   # Highest-named NDK, matching how the upstream-runtime task picks one.
   ANDROID_NDK_HOME="$(ls -d "$sdk"/ndk/* 2>/dev/null | sort | tail -1)"
 fi
