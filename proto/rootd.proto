@@ -159,15 +159,25 @@ enum ChildKind {
   CHILD_KIND_UNSPECIFIED = 0;
   CHILD_KIND_XRAY = 1;
   CHILD_KIND_VKTURN = 2;
+  CHILD_KIND_BYEDPI = 3;
 }
 
 message SpawnChildCommand {
   ChildKind kind = 1;
-  // Path of the binary inside the app's nativeLibraryDir; the daemon checks it is
-  // really under that directory before exec.
+  // For kinds that are a plain executable (vkturn): its path inside the app's
+  // nativeLibraryDir, which the daemon verifies before exec.
   string binary_path = 2;
   repeated string args = 3;
   string working_dir = 4;
+
+  // For kinds that run inside app_process (byedpi, xray): the app's apk for the
+  // CLASSPATH and its native library dir.
+  //
+  // The entry class is NOT taken from here - the daemon pins it. A client that named
+  // its own class would be asking the daemon to run arbitrary code as root, which is
+  // precisely what the uid check is not meant to be the only guard against.
+  string classpath = 5;
+  string lib_dir = 6;
 }
 
 message ChildHandle {

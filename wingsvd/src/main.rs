@@ -251,12 +251,7 @@ fn dispatch(envelope: ClientEnvelope, session: &Mutex<Session>) -> Result<Payloa
             }))
         }
         ClientCommand::SpawnChild(command) => {
-            let handle = session.children.spawn(
-                command.kind,
-                &command.binary_path,
-                &command.args,
-                &command.working_dir,
-            )?;
+            let handle = session.children.spawn(&command)?;
             Ok(Payload::Child(handle))
         }
         ClientCommand::KillChild(command) => {
