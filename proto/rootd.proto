@@ -27,6 +27,7 @@ message ClientEnvelope {
     SpawnChildCommand spawn_child = 6;
     KillChildCommand kill_child = 7;
     ReadCountersCommand read_counters = 8;
+    ReadNetDevCommand read_net_dev = 9;
   }
 }
 
@@ -45,6 +46,7 @@ message ReplyFrame {
     SessionState session_state = 3;
     ChildHandle child = 4;
     Counters counters = 5;
+    NetDev net_dev = 6;
   }
 }
 
@@ -197,4 +199,16 @@ message Counters {
   // Bytes matched by the tproxy mark rule; exact, and free of the 1 Hz throttle the
   // app has to live with when it shells out for them itself.
   uint64 tproxy_mark_bytes = 1;
+}
+
+// Reads /proc/net/dev on the app's behalf. Android 16 tightened SELinux so the app's
+// own untrusted_app process is denied that read, which killed the speed graph and
+// per-interface traffic accounting in root/tproxy mode; the daemon reads it in its
+// permitted context and hands back the raw text for the app to parse. See issue #76.
+message ReadNetDevCommand {}
+
+message NetDev {
+  // Verbatim /proc/net/dev contents; the app already parses this format, so the
+  // daemon does not duplicate the column parsing.
+  string content = 1;
 }

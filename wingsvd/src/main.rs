@@ -33,8 +33,8 @@ use rootd::client_envelope::Command as ClientCommand;
 use rootd::daemon_envelope::Frame;
 use rootd::reply_frame::Payload;
 use rootd::{
-    Ack, ClientEnvelope, Counters, DaemonEnvelope, ErrorFrame, HelloReply, ReplyFrame, RoutingSpec,
-    SessionState,
+    Ack, ClientEnvelope, Counters, DaemonEnvelope, ErrorFrame, HelloReply, NetDev, ReplyFrame,
+    RoutingSpec, SessionState,
 };
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -52,7 +52,9 @@ use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
 
 pub const SOCKET_NAME: &str = "wings.v.rootd";
 const APP_PACKAGE: &str = "wings.v";
-const PROTOCOL_VERSION: u32 = 1;
+// 2 adds the read_net_dev command (the "netdev" cap). Additive, so MIN_SUPPORTED
+// stays at 1: an older app that never sends read_net_dev still works unchanged.
+const PROTOCOL_VERSION: u32 = 2;
 /// Oldest client we still speak to. Moves only when semantics change, never when a
 /// field is added.
 const MIN_SUPPORTED: u32 = 1;
@@ -210,6 +212,7 @@ fn dispatch(envelope: ClientEnvelope, session: &Mutex<Session>) -> Result<Payloa
                     "routing".to_string(),
                     "children".to_string(),
                     "counters".to_string(),
+                    "netdev".to_string(),
                 ],
             }))
         }
@@ -268,6 +271,14 @@ fn dispatch(envelope: ClientEnvelope, session: &Mutex<Session>) -> Result<Payloa
                 None => 0,
             };
             Ok(Payload::Counters(Counters { tproxy_mark_bytes }))
+        }
+        ClientCommand::ReadNetDev(_) => {
+            // The app is denied this read from its own untrusted_app context on
+            // Android 16; we are in a permitted one, so read it and hand back the raw
+            // text for the app to parse.
+            let content = std::fs::read_to_string("/proc/net/dev")
+                .map_err(|error| format!("read /proc/net/dev: {error}"))?;
+            Ok(Payload::NetDev(NetDev { content }))
         }
     }
 }
