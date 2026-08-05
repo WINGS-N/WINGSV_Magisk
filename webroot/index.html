@@ -150,11 +150,56 @@
       // KernelSU hands the page a shell and nothing else, so every call goes through
       // the daemon's own `wingsvd status|stop`. That CLI is a client of the running
       // daemon, not a second source of truth.
+      // The injected ksu.exec is callback-style: ksu.exec(cmd, optionsJson, cbName)
+      // returns undefined and delivers the result to window[cbName](errno, stdout,
+      // stderr). Calling it like a promise ("await ksu.exec(cmd, {})") resolves to
+      // undefined and then crashes on destructuring. Wrap it in a promise via the
+      // callback; also honour builds where ksu.exec already returns a promise.
+      function ksuExec(cmd) {
+        return new Promise((resolve, reject) => {
+          let settled = false;
+          const cbName =
+            "__wingsv_exec_cb_" + Date.now() + "_" + Math.floor(Math.random() * 1e9);
+          const done = (res) => {
+            if (settled) return;
+            settled = true;
+            try {
+              delete window[cbName];
+            } catch (_) {}
+            resolve(res);
+          };
+          window[cbName] = (errno, stdout, stderr) => done({ errno, stdout, stderr });
+          let ret;
+          try {
+            ret = ksu.exec(cmd, JSON.stringify({}), cbName);
+          } catch (e) {
+            if (!settled) {
+              settled = true;
+              try {
+                delete window[cbName];
+              } catch (_) {}
+              reject(e);
+            }
+            return;
+          }
+          if (ret && typeof ret.then === "function") {
+            ret.then(done, (e) => {
+              if (settled) return;
+              settled = true;
+              try {
+                delete window[cbName];
+              } catch (_) {}
+              reject(e);
+            });
+          }
+        });
+      }
+
       async function sh(cmd) {
         if (typeof ksu === "undefined" || !ksu.exec) {
           throw new Error("this page needs the KernelSU / APatch web ui");
         }
-        const { errno, stdout, stderr } = await ksu.exec(cmd, {});
+        const { errno, stdout, stderr } = (await ksuExec(cmd)) || {};
         if (errno !== 0 && !stdout) throw new Error(stderr || `exit ${errno}`);
         return stdout;
       }
