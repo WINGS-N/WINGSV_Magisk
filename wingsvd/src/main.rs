@@ -17,8 +17,19 @@
 //!   * the daemon never runs a string it was handed: routing is rebuilt from a typed
 //!     spec, and only binaries inside the app's native library dir may be exec'd.
 
+/// Writes one line to stderr (kept for service.sh's `| log -t wingsvd` pipe) and to
+/// the rotating file log. In scope for the whole daemon module below.
+macro_rules! logln {
+    ($($arg:tt)*) => {{
+        let __line = format!($($arg)*);
+        eprintln!("{__line}");
+        crate::log::write(&__line);
+    }};
+}
+
 mod children;
 mod cli;
+mod log;
 mod packages;
 mod routing;
 mod wire;
@@ -82,10 +93,14 @@ fn main() {
         std::process::exit(cli::run(command));
     }
 
+    // Daemon path only (never the short-lived status/stop CLI, which polls): open
+    // the rotating file log before anything else can fail.
+    log::init();
+
     let addr = match SocketAddr::from_abstract_name(SOCKET_NAME) {
         Ok(addr) => addr,
         Err(error) => {
-            eprintln!("wingsvd: abstract name {SOCKET_NAME}: {error}");
+            logln!("wingsvd: abstract name {SOCKET_NAME}: {error}");
             std::process::exit(1);
         }
     };
@@ -94,11 +109,11 @@ fn main() {
         Err(error) => {
             // Another instance already holds the name; the module's service.sh restarts
             // us, so exiting is the right move rather than fighting over it.
-            eprintln!("wingsvd: bind @{SOCKET_NAME}: {error}");
+            logln!("wingsvd: bind @{SOCKET_NAME}: {error}");
             std::process::exit(1);
         }
     };
-    eprintln!("wingsvd {MODULE_VERSION} listening on @{SOCKET_NAME}");
+    logln!("wingsvd {MODULE_VERSION} listening on @{SOCKET_NAME}");
 
     // A thread per client, not a serial loop: the app holds its connection open for the
     // life of the tunnel, so anything serial would leave the web ui waiting forever for
@@ -110,7 +125,7 @@ fn main() {
                 let session = Arc::clone(&session);
                 thread::spawn(move || serve(stream, &session));
             }
-            Err(error) => eprintln!("wingsvd: accept: {error}"),
+            Err(error) => logln!("wingsvd: accept: {error}"),
         }
     }
 }
@@ -120,7 +135,7 @@ fn serve(stream: UnixStream, session: &Mutex<Session>) {
     let uid = match peer_uid(&stream) {
         Ok(uid) => uid,
         Err(error) => {
-            eprintln!("wingsvd: SO_PEERCRED failed, dropping connection: {error}");
+            logln!("wingsvd: SO_PEERCRED failed, dropping connection: {error}");
             return;
         }
     };
@@ -129,7 +144,7 @@ fn serve(stream: UnixStream, session: &Mutex<Session>) {
     // Root is the module's own web ui / CLI. It could edit our files anyway, so the
     // socket is not what keeps it out; everyone else is refused.
     if !is_app && uid != 0 {
-        eprintln!("wingsvd: rejected uid={uid} (app is {app_uid:?})");
+        logln!("wingsvd: rejected uid={uid} (app is {app_uid:?})");
         return;
     }
 
@@ -149,14 +164,14 @@ fn serve(stream: UnixStream, session: &Mutex<Session>) {
             // returning app that decides otherwise, takes it down.
             Ok(None) => break,
             Err(error) => {
-                eprintln!("wingsvd: read: {error}");
+                logln!("wingsvd: read: {error}");
                 break;
             }
         };
         let envelope = match ClientEnvelope::decode(request.as_slice()) {
             Ok(envelope) => envelope,
             Err(error) => {
-                eprintln!("wingsvd: malformed envelope: {error}");
+                logln!("wingsvd: malformed envelope: {error}");
                 break;
             }
         };
@@ -172,7 +187,7 @@ fn serve(stream: UnixStream, session: &Mutex<Session>) {
             frame: Some(frame),
         };
         if let Err(error) = wire::write_frame(&stream, &response.encode_to_vec()) {
-            eprintln!("wingsvd: write: {error}");
+            logln!("wingsvd: write: {error}");
             break;
         }
     }
@@ -184,7 +199,7 @@ fn serve(stream: UnixStream, session: &Mutex<Session>) {
     session.app_clients = session.app_clients.saturating_sub(1);
     if session.app_clients == 0 && session.spec.is_some() {
         session.orphaned = true;
-        eprintln!("wingsvd: app gone, keeping the session (orphaned)");
+        logln!("wingsvd: app gone, keeping the session (orphaned)");
     }
 }
 
@@ -200,9 +215,10 @@ fn dispatch(envelope: ClientEnvelope, session: &Mutex<Session>) -> Result<Payloa
         ClientCommand::Hello(hello) => {
             // Answer even when the versions disagree: the client needs our numbers to
             // tell the user which side is behind.
-            eprintln!(
+            logln!(
                 "wingsvd: hello from app {} (protocol {})",
-                hello.app_version, hello.protocol_version
+                hello.app_version,
+                hello.protocol_version
             );
             Ok(Payload::Hello(HelloReply {
                 protocol_version: PROTOCOL_VERSION,
@@ -221,6 +237,7 @@ fn dispatch(envelope: ClientEnvelope, session: &Mutex<Session>) -> Result<Payloa
                 .spec
                 .ok_or_else(|| "apply_routing without a spec".to_string())?;
             routing::apply(&spec)?;
+            logln!("apply_routing ok");
             session.spec = Some(spec);
             session.orphaned = false;
             Ok(Payload::Ack(Ack {}))
@@ -231,6 +248,7 @@ fn dispatch(envelope: ClientEnvelope, session: &Mutex<Session>) -> Result<Payloa
             }
             session.children.kill_all();
             session.orphaned = false;
+            logln!("clear_routing ok");
             Ok(Payload::Ack(Ack {}))
         }
         ClientCommand::SessionState(_) => {
