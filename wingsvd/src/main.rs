@@ -30,6 +30,7 @@ macro_rules! logln {
 mod children;
 mod cli;
 mod log;
+mod netlink;
 mod packages;
 mod routing;
 mod wire;
@@ -124,6 +125,7 @@ fn main() {
     // life of the tunnel, so anything serial would leave the web ui waiting forever for
     // a turn that never comes. The lock is taken per request, never across a read.
     let session = Arc::new(Mutex::new(Session::default()));
+    spawn_netlink_monitor(Arc::clone(&session));
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
@@ -356,6 +358,66 @@ fn clear_forwarded_carve_outs(session: &mut Session) {
             exclusion.tproxy_pre_chain.as_str()
         };
         routing::clear_forwarded_exclusion(pre_chain);
+    }
+}
+
+/// Watches the kernel for network changes and, when the session has outlived its app,
+/// re-points the upstream mirror table at the live physical default by itself. A live
+/// app owns this through its own connectivity callbacks; the daemon only steps in once
+/// nobody is there to, which is exactly when a handover would otherwise strand sharing.
+fn spawn_netlink_monitor(session: Arc<Mutex<Session>>) {
+    thread::spawn(move || {
+        let monitor = match netlink::Monitor::open() {
+            Ok(monitor) => monitor,
+            Err(error) => {
+                logln!("wingsvd: netlink monitor unavailable, routing will not self-heal: {error}");
+                return;
+            }
+        };
+        logln!("wingsvd: netlink monitor watching for network changes");
+        loop {
+            match monitor.wait_for_change(&ignored_tables(&session)) {
+                Ok(()) => {}
+                Err(error) => {
+                    logln!("wingsvd: netlink recv failed, monitor stopping: {error}");
+                    return;
+                }
+            }
+            // A handover fires a burst of link/addr/route messages; coalesce them before
+            // the reassert, which is itself several route writes.
+            thread::sleep(std::time::Duration::from_millis(700));
+            reassert_upstream_if_unowned(&session);
+        }
+    });
+}
+
+/// The tables the daemon writes itself, so the monitor can tell its own route churn from
+/// a real network change. Read from the live spec rather than hardcoded, so the numbers
+/// stay owned by the app that sent them.
+fn ignored_tables(session: &Mutex<Session>) -> Vec<u32> {
+    let session = session.lock().unwrap();
+    match &session.spec {
+        Some(spec) => {
+            let mut tables = vec![spec.upstream_table];
+            if let Some(tproxy) = &spec.tproxy {
+                tables.push(tproxy.route_table);
+            }
+            tables
+        }
+        None => Vec::new(),
+    }
+}
+
+fn reassert_upstream_if_unowned(session: &Mutex<Session>) {
+    let session = session.lock().unwrap();
+    // Only take over when the app is gone: a live app reapplies through its own
+    // connectivity callback, and two writers racing on the one table would just fight.
+    if session.app_clients > 0 {
+        return;
+    }
+    if let Some(spec) = &session.spec {
+        routing::reassert_upstream_routes(spec);
+        logln!("netlink: reasserted the upstream routes for an orphaned session");
     }
 }
 

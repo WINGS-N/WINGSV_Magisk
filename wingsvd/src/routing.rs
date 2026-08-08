@@ -226,6 +226,35 @@ pub fn clear(spec: &RoutingSpec) {
     }
 }
 
+/// Re-derives the underlying default routes from the main table and rewrites the
+/// upstream mirror table with them. This is the one piece of an owned session that goes
+/// stale when the physical network changes underneath it: the ip rules still point at
+/// the upstream table, but its default now names a dead interface, so the tunnel's own
+/// egress - and every bypass - black-holes until the table is refreshed. The app does
+/// this from a ConnectivityManager callback; the daemon does it from netlink so an
+/// orphaned session survives a network handover with no app alive to notice.
+///
+/// Only the routes are touched, not the ip rules or the mangle marks: the rules keep
+/// pointing at the same table, and re-deriving the bypass fwmark is the app's job when
+/// it is alive - a stale mark only costs the bypass apps, while a stale upstream default
+/// costs everything, sharing included. The main table carries the physical default only
+/// (kernel WG is reached by ip rule, not a default there), so the read needs no filtering.
+pub fn reassert_upstream_routes(spec: &RoutingSpec) {
+    let table = spec.upstream_table.to_string();
+    run_quiet(IP, &["route", "flush", "table", &table]);
+    run_quiet(IP, &["-6", "route", "flush", "table", &table]);
+    for route in crate::netlink::default_routes(false) {
+        let mut args = vec!["route", "add", "table", &table];
+        args.extend(route.split_whitespace());
+        run_quiet(IP, &args);
+    }
+    for route in crate::netlink::default_routes(true) {
+        let mut args = vec!["-6", "route", "add", "table", &table];
+        args.extend(route.split_whitespace());
+        run_quiet(IP, &args);
+    }
+}
+
 /// DNATs forwarded client traffic on the downstream interfaces into the local
 /// dokodemo-door redirect port. IPv4/nat only: shared clients are IPv4 and REDIRECT is
 /// an IPv4 nat target. Re-asserted from scratch every call so a changed interface set
