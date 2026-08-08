@@ -8,12 +8,19 @@
 //! already removed, are not errors. It has to be safe to run against an unknown state,
 //! because that is exactly the state left behind by an app the system killed.
 
-use crate::rootd::{RoutingSpec, TproxySpec};
+use crate::rootd::{ForwardedExclusionSpec, ForwardedRedirectSpec, RoutingSpec, TproxySpec};
 use std::process::{Command, Stdio};
 
 const IP: &str = "ip";
 const IPTABLES: &str = "iptables";
 const IP6TABLES: &str = "ip6tables";
+
+// The forwarded-client carve-out chains. The app owns the same names on its su path,
+// so the daemon must not rename them: the two sides have to be able to clear each
+// other's leftovers when the user flips between having the module and not.
+const REDIRECT_CHAIN: &str = "WINGS_XRAY_REDIR";
+const FORWARD_EXCLUSION_CHAIN: &str = "WINGS_XRAY_TP_FWD";
+const DEFAULT_TPROXY_PRE_CHAIN: &str = "WINGS_XRAY_TP_PRE";
 
 /// Runs a command, returning whether it exited 0. Output is discarded: callers either
 /// do not care or check the status.
@@ -216,6 +223,214 @@ pub fn clear(spec: &RoutingSpec) {
         let table = tproxy.route_table.to_string();
         rule_del_pref(false, tproxy.rule_priority);
         run_quiet(IP, &["route", "flush", "table", &table]);
+    }
+}
+
+/// DNATs forwarded client traffic on the downstream interfaces into the local
+/// dokodemo-door redirect port. IPv4/nat only: shared clients are IPv4 and REDIRECT is
+/// an IPv4 nat target. Re-asserted from scratch every call so a changed interface set
+/// cannot stack a second copy.
+pub fn apply_forwarded_redirect(spec: &ForwardedRedirectSpec) {
+    clear_forwarded_redirect();
+    if spec.downstream_interfaces.is_empty() || spec.redirect_port == 0 {
+        return;
+    }
+    let port = spec.redirect_port.to_string();
+    run_quiet(IPTABLES, &["-w", "5", "-t", "nat", "-N", REDIRECT_CHAIN]);
+    run_quiet(IPTABLES, &["-w", "5", "-t", "nat", "-F", REDIRECT_CHAIN]);
+    for iface in &spec.downstream_interfaces {
+        if iface.is_empty() {
+            continue;
+        }
+        run_quiet(
+            IPTABLES,
+            &[
+                "-w",
+                "5",
+                "-t",
+                "nat",
+                "-A",
+                REDIRECT_CHAIN,
+                "-i",
+                iface,
+                "-p",
+                "tcp",
+                "-j",
+                "REDIRECT",
+                "--to-ports",
+                &port,
+            ],
+        );
+        // Leave udp/53 to the AP gateway's own dnsmasq: DNS over the dokodemo-door
+        // followRedirect path does not survive the udp return trip.
+        run_quiet(
+            IPTABLES,
+            &[
+                "-w",
+                "5",
+                "-t",
+                "nat",
+                "-A",
+                REDIRECT_CHAIN,
+                "-i",
+                iface,
+                "-p",
+                "udp",
+                "!",
+                "--dport",
+                "53",
+                "-j",
+                "REDIRECT",
+                "--to-ports",
+                &port,
+            ],
+        );
+    }
+    // Hook at the top of nat PREROUTING, before the system tether / vpnhotspot
+    // MASQUERADE chains, and only if it is not already there so re-apply stays single.
+    if !run(
+        IPTABLES,
+        &[
+            "-w",
+            "5",
+            "-t",
+            "nat",
+            "-C",
+            "PREROUTING",
+            "-j",
+            REDIRECT_CHAIN,
+        ],
+    ) {
+        run_quiet(
+            IPTABLES,
+            &[
+                "-w",
+                "5",
+                "-t",
+                "nat",
+                "-I",
+                "PREROUTING",
+                "-j",
+                REDIRECT_CHAIN,
+            ],
+        );
+    }
+}
+
+pub fn clear_forwarded_redirect() {
+    run_quiet(
+        IPTABLES,
+        &[
+            "-w",
+            "5",
+            "-t",
+            "nat",
+            "-D",
+            "PREROUTING",
+            "-j",
+            REDIRECT_CHAIN,
+        ],
+    );
+    run_quiet(IPTABLES, &["-w", "5", "-t", "nat", "-F", REDIRECT_CHAIN]);
+    run_quiet(IPTABLES, &["-w", "5", "-t", "nat", "-X", REDIRECT_CHAIN]);
+}
+
+/// Carves forwarded traffic out of the device tproxy by jumping a chain of ACCEPTs in
+/// first thing in the tproxy PREROUTING chain. dns_only narrows the carve-out to the
+/// clients' udp/53; otherwise all forwarded traffic on the interfaces goes direct.
+pub fn apply_forwarded_exclusion(spec: &ForwardedExclusionSpec) {
+    let pre_chain = pre_chain_or_default(spec);
+    clear_forwarded_exclusion(pre_chain);
+    if spec.downstream_interfaces.is_empty() {
+        return;
+    }
+    run_quiet(
+        IPTABLES,
+        &["-w", "5", "-t", "mangle", "-N", FORWARD_EXCLUSION_CHAIN],
+    );
+    run_quiet(
+        IPTABLES,
+        &["-w", "5", "-t", "mangle", "-F", FORWARD_EXCLUSION_CHAIN],
+    );
+    for iface in &spec.downstream_interfaces {
+        if iface.is_empty() {
+            continue;
+        }
+        let mut args = vec![
+            "-w",
+            "5",
+            "-t",
+            "mangle",
+            "-A",
+            FORWARD_EXCLUSION_CHAIN,
+            "-i",
+            iface,
+        ];
+        if spec.dns_only {
+            args.extend_from_slice(&["-p", "udp", "-m", "udp", "--dport", "53"]);
+        }
+        args.extend_from_slice(&["-j", "ACCEPT"]);
+        run_quiet(IPTABLES, &args);
+    }
+    // Jump first in the device tproxy PREROUTING chain (dedupe, then insert at index 1).
+    run_quiet(
+        IPTABLES,
+        &[
+            "-w",
+            "5",
+            "-t",
+            "mangle",
+            "-D",
+            pre_chain,
+            "-j",
+            FORWARD_EXCLUSION_CHAIN,
+        ],
+    );
+    run_quiet(
+        IPTABLES,
+        &[
+            "-w",
+            "5",
+            "-t",
+            "mangle",
+            "-I",
+            pre_chain,
+            "1",
+            "-j",
+            FORWARD_EXCLUSION_CHAIN,
+        ],
+    );
+}
+
+pub fn clear_forwarded_exclusion(pre_chain: &str) {
+    run_quiet(
+        IPTABLES,
+        &[
+            "-w",
+            "5",
+            "-t",
+            "mangle",
+            "-D",
+            pre_chain,
+            "-j",
+            FORWARD_EXCLUSION_CHAIN,
+        ],
+    );
+    run_quiet(
+        IPTABLES,
+        &["-w", "5", "-t", "mangle", "-F", FORWARD_EXCLUSION_CHAIN],
+    );
+    run_quiet(
+        IPTABLES,
+        &["-w", "5", "-t", "mangle", "-X", FORWARD_EXCLUSION_CHAIN],
+    );
+}
+
+fn pre_chain_or_default(spec: &ForwardedExclusionSpec) -> &str {
+    if spec.tproxy_pre_chain.is_empty() {
+        DEFAULT_TPROXY_PRE_CHAIN
+    } else {
+        spec.tproxy_pre_chain.as_str()
     }
 }
 

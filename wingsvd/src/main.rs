@@ -44,8 +44,8 @@ use rootd::client_envelope::Command as ClientCommand;
 use rootd::daemon_envelope::Frame;
 use rootd::reply_frame::Payload;
 use rootd::{
-    Ack, ClientEnvelope, Counters, DaemonEnvelope, ErrorFrame, HelloReply, NetDev, ReplyFrame,
-    RoutingSpec, SessionState,
+    Ack, ClientEnvelope, Counters, DaemonEnvelope, ErrorFrame, ForwardedExclusionSpec,
+    ForwardedRedirectSpec, HelloReply, NetDev, ReplyFrame, RoutingSpec, SessionState,
 };
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -63,9 +63,10 @@ use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
 
 pub const SOCKET_NAME: &str = "wings.v.rootd";
 const APP_PACKAGE: &str = "wings.v";
-// 2 adds the read_net_dev command (the "netdev" cap). Additive, so MIN_SUPPORTED
-// stays at 1: an older app that never sends read_net_dev still works unchanged.
-const PROTOCOL_VERSION: u32 = 2;
+// 2 adds the read_net_dev command (the "netdev" cap). 3 adds the forwarded-client
+// carve-outs (the "sharing" cap). Both additive, so MIN_SUPPORTED stays at 1: an older
+// app that never sends the new commands still works unchanged.
+const PROTOCOL_VERSION: u32 = 3;
 /// Oldest client we still speak to. Moves only when semantics change, never when a
 /// field is added.
 const MIN_SUPPORTED: u32 = 1;
@@ -78,6 +79,10 @@ const MODULE_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Default)]
 struct Session {
     spec: Option<RoutingSpec>,
+    /// Last forwarded-client carve-outs, kept for the same reason the routing spec is:
+    /// so the daemon can hold them up past the app and tear them down by itself.
+    forwarded_redirect: Option<ForwardedRedirectSpec>,
+    forwarded_exclusion: Option<ForwardedExclusionSpec>,
     orphaned: bool,
     children: Children,
     /// How many app-uid clients are connected. The web ui shows "app connected"
@@ -229,6 +234,7 @@ fn dispatch(envelope: ClientEnvelope, session: &Mutex<Session>) -> Result<Payloa
                     "children".to_string(),
                     "counters".to_string(),
                     "netdev".to_string(),
+                    "sharing".to_string(),
                 ],
             }))
         }
@@ -246,9 +252,45 @@ fn dispatch(envelope: ClientEnvelope, session: &Mutex<Session>) -> Result<Payloa
             if let Some(spec) = session.spec.take() {
                 routing::clear(&spec);
             }
+            // A full teardown clears the sharing carve-outs too: sharing needs the
+            // tunnel that is going away, and this is also the path that reclaims an
+            // orphaned session's leftovers when nobody else will.
+            clear_forwarded_carve_outs(session);
             session.children.kill_all();
             session.orphaned = false;
             logln!("clear_routing ok");
+            Ok(Payload::Ack(Ack {}))
+        }
+        ClientCommand::ApplyForwardedRedirect(command) => {
+            let spec = command
+                .spec
+                .ok_or_else(|| "apply_forwarded_redirect without a spec".to_string())?;
+            routing::apply_forwarded_redirect(&spec);
+            logln!(
+                "forwarded_redirect ok ({} ifaces)",
+                spec.downstream_interfaces.len()
+            );
+            session.forwarded_redirect = if spec.downstream_interfaces.is_empty() {
+                None
+            } else {
+                Some(spec)
+            };
+            Ok(Payload::Ack(Ack {}))
+        }
+        ClientCommand::ApplyForwardedExclusion(command) => {
+            let spec = command
+                .spec
+                .ok_or_else(|| "apply_forwarded_exclusion without a spec".to_string())?;
+            routing::apply_forwarded_exclusion(&spec);
+            logln!(
+                "forwarded_exclusion ok ({} ifaces)",
+                spec.downstream_interfaces.len()
+            );
+            session.forwarded_exclusion = if spec.downstream_interfaces.is_empty() {
+                None
+            } else {
+                Some(spec)
+            };
             Ok(Payload::Ack(Ack {}))
         }
         ClientCommand::SessionState(_) => {
@@ -298,6 +340,22 @@ fn dispatch(envelope: ClientEnvelope, session: &Mutex<Session>) -> Result<Payloa
                 .map_err(|error| format!("read /proc/net/dev: {error}"))?;
             Ok(Payload::NetDev(NetDev { content }))
         }
+    }
+}
+
+/// Tears down the forwarded-client carve-outs and forgets them. Uses the stored
+/// exclusion's chain name so the jump is removed from the same place it was inserted.
+fn clear_forwarded_carve_outs(session: &mut Session) {
+    if session.forwarded_redirect.take().is_some() {
+        routing::clear_forwarded_redirect();
+    }
+    if let Some(exclusion) = session.forwarded_exclusion.take() {
+        let pre_chain = if exclusion.tproxy_pre_chain.is_empty() {
+            "WINGS_XRAY_TP_PRE"
+        } else {
+            exclusion.tproxy_pre_chain.as_str()
+        };
+        routing::clear_forwarded_exclusion(pre_chain);
     }
 }
 

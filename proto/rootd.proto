@@ -28,6 +28,8 @@ message ClientEnvelope {
     KillChildCommand kill_child = 7;
     ReadCountersCommand read_counters = 8;
     ReadNetDevCommand read_net_dev = 9;
+    ApplyForwardedRedirectCommand apply_forwarded_redirect = 10;
+    ApplyForwardedExclusionCommand apply_forwarded_exclusion = 11;
   }
 }
 
@@ -130,6 +132,41 @@ message ApplyRoutingCommand {
 }
 
 message ClearRoutingCommand {}
+
+// The forwarded-client carve-outs for VPN sharing. They were the last piece of the
+// tethering routing still applied over su - the app-owned half, not the vendored
+// masquerade engine - so a killed app stranded them with no owner to reassert or
+// clear. The daemon keeps the last spec of each so it can hold the carve-out up past
+// the app, and tear it down by itself on clear. Both are keyed on the live downstream
+// interface set; an empty set clears the carve-out.
+
+// Redirects forwarded (hotspot/usb client) traffic on the named downstream interfaces
+// into the local dokodemo-door redirect inbound, so shared clients egress through the
+// active outbound rather than the physical upstream (nat chain WINGS_XRAY_REDIR, IPv4
+// only). Port 0 or an empty interface set clears it.
+message ForwardedRedirectSpec {
+  repeated string downstream_interfaces = 1;
+  uint32 redirect_port = 2;
+}
+
+message ApplyForwardedRedirectCommand {
+  ForwardedRedirectSpec spec = 1;
+}
+
+// Carves forwarded traffic out of the on-device tproxy so it is not tunneled unless
+// the user turned sharing on (mangle chain WINGS_XRAY_TP_FWD jumped first into the
+// tproxy PREROUTING chain named here). With dns_only set only the clients' udp/53 is
+// carved out and the rest stays tunneled; without it all forwarded traffic from the
+// interfaces goes direct. An empty interface set clears it.
+message ForwardedExclusionSpec {
+  repeated string downstream_interfaces = 1;
+  bool dns_only = 2;
+  string tproxy_pre_chain = 3;
+}
+
+message ApplyForwardedExclusionCommand {
+  ForwardedExclusionSpec spec = 1;
+}
 
 message SessionStateCommand {}
 
