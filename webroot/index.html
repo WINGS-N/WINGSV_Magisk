@@ -124,28 +124,103 @@
   </head>
   <body>
     <p class="kicker">WINGS V</p>
-    <h1>Root helper</h1>
+    <h1 data-i18n="title">Root helper</h1>
 
     <div class="card">
-      <div class="row"><span class="k">Daemon</span><span class="v" id="daemon">…</span></div>
-      <div class="row"><span class="k">Tunnel</span><span class="v" id="tunnel">…</span></div>
-      <div class="row"><span class="k">App</span><span class="v" id="app">…</span></div>
-      <div class="row"><span class="k">Proxied</span><span class="v" id="bytes">…</span></div>
-      <div class="row"><span class="k">Children</span><span class="v" id="children">…</span></div>
+      <div class="row"><span class="k" data-i18n="daemon">Daemon</span><span class="v" id="daemon">…</span></div>
+      <div class="row"><span class="k" data-i18n="tunnel">Tunnel</span><span class="v" id="tunnel">…</span></div>
+      <div class="row"><span class="k" data-i18n="app">App</span><span class="v" id="app">…</span></div>
+      <div class="row"><span class="k" data-i18n="proxied">Proxied</span><span class="v" id="bytes">…</span></div>
+      <div class="row"><span class="k" data-i18n="children">Children</span><span class="v" id="children">…</span></div>
     </div>
 
     <div class="err" id="err" hidden></div>
 
     <div class="actions">
-      <button id="stop" disabled>Stop the tunnel</button>
-      <p class="hint" id="stophint">Removes the routing this module installed. The app can start it again.</p>
-      <button id="disable" class="danger">Disable the module</button>
-      <p class="hint">Takes effect after a reboot. The app then handles routing itself, exactly as it does without the module.</p>
+      <button id="stop" data-i18n="stop" disabled>Stop the tunnel</button>
+      <p class="hint" id="stophint" data-i18n="stopHint">Removes the routing this module installed. The app can start it again.</p>
+      <button id="disable" class="danger" data-i18n="disable">Disable the module</button>
+      <p class="hint" data-i18n="disableHint">Takes effect after a reboot. The app then handles routing itself, exactly as it does without the module.</p>
     </div>
 
     <script>
       const MODDIR = "/data/adb/modules/wingsv_rootd";
       const $ = (id) => document.getElementById(id);
+
+      // en is the default and the fallback; ru is picked when the device's preferred
+      // language is Russian. Adding a locale is a matter of another entry here plus a
+      // startsWith check below - the manager passes the system language through the
+      // usual navigator fields.
+      const STRINGS = {
+        en: {
+          title: "Root helper",
+          daemon: "Daemon",
+          tunnel: "Tunnel",
+          app: "App",
+          proxied: "Proxied",
+          children: "Children",
+          stop: "Stop the tunnel",
+          stopHint: "Removes the routing this module installed. The app can start it again.",
+          disable: "Disable the module",
+          disableHint: "Takes effect after a reboot. The app then handles routing itself, exactly as it does without the module.",
+          notRunning: "not running",
+          daemonSilent: "the daemon is not answering",
+          running: "running",
+          up: "up",
+          upAppGone: "up, app gone",
+          down: "down",
+          connected: "connected",
+          notConnected: "not connected",
+          none: "none",
+          childrenRunning: (n) => `${n} running`,
+          needsWebui: "this page needs the KernelSU / APatch web ui",
+          moduleDisabled: "Module disabled. Reboot to finish.",
+        },
+        ru: {
+          title: "Root-помощник",
+          daemon: "Демон",
+          tunnel: "Туннель",
+          app: "Приложение",
+          proxied: "Через прокси",
+          children: "Процессы",
+          stop: "Остановить туннель",
+          stopHint: "Убирает маршрутизацию, установленную модулем. Приложение сможет запустить её снова.",
+          disable: "Отключить модуль",
+          disableHint: "Вступит в силу после перезагрузки. После неё приложение само управляет маршрутизацией, как и без модуля.",
+          notRunning: "не запущен",
+          daemonSilent: "демон не отвечает",
+          running: "работает",
+          up: "поднят",
+          upAppGone: "поднят, приложение закрыто",
+          down: "выключен",
+          connected: "подключено",
+          notConnected: "не подключено",
+          none: "нет",
+          childrenRunning: (n) => `${n} запущено`,
+          needsWebui: "этой странице нужен веб-интерфейс KernelSU / APatch",
+          moduleDisabled: "Модуль отключён. Перезагрузите, чтобы завершить.",
+        },
+      };
+
+      function pickLang() {
+        const prefs =
+          navigator.languages && navigator.languages.length
+            ? navigator.languages
+            : [navigator.language || "en"];
+        for (const pref of prefs) {
+          if (pref && pref.toLowerCase().startsWith("ru")) return "ru";
+        }
+        return "en";
+      }
+
+      const LANG = pickLang();
+      const T = STRINGS[LANG];
+      document.documentElement.lang = LANG;
+      document.title = "WINGS V " + T.title;
+      for (const el of document.querySelectorAll("[data-i18n]")) {
+        const value = T[el.getAttribute("data-i18n")];
+        if (typeof value === "string") el.textContent = value;
+      }
 
       // KernelSU hands the page a shell and nothing else, so every call goes through
       // the daemon's own `wingsvd status|stop`. That CLI is a client of the running
@@ -197,7 +272,7 @@
 
       async function sh(cmd) {
         if (typeof ksu === "undefined" || !ksu.exec) {
-          throw new Error("this page needs the KernelSU / APatch web ui");
+          throw new Error(T.needsWebui);
         }
         const { errno, stdout, stderr } = (await ksuExec(cmd)) || {};
         if (errno !== 0 && !stdout) throw new Error(stderr || `exit ${errno}`);
@@ -238,30 +313,30 @@
           const s = JSON.parse(await sh(`${await daemon()} status`));
 
           if (!s.running) {
-            mark($("daemon"), "off", "not running");
+            mark($("daemon"), "off", T.notRunning);
             mark($("tunnel"), "off", "-");
             mark($("app"), "off", "-");
             $("bytes").textContent = "-";
             $("children").textContent = "-";
             $("stop").disabled = true;
-            fail(s.error || "the daemon is not answering");
+            fail(s.error || T.daemonSilent);
             return;
           }
           $("err").hidden = true;
 
-          mark($("daemon"), "ok", `running <span class="badge">v${s.version}</span>`);
+          mark($("daemon"), "ok", `${T.running} <span class="badge">v${s.version}</span>`);
           if (s.tunnel) {
             // Orphaned is not an error: the tunnel deliberately outlives an app the
             // system killed, so it gets said plainly rather than dressed as a fault.
             const name = s.tunnel_name ? ` (${s.tunnel_name})` : "";
-            mark($("tunnel"), s.orphaned ? "warn" : "ok", s.orphaned ? `up, app gone${name}` : `up${name}`);
+            mark($("tunnel"), s.orphaned ? "warn" : "ok", (s.orphaned ? T.upAppGone : T.up) + name);
           } else {
-            mark($("tunnel"), "off", "down");
+            mark($("tunnel"), "off", T.down);
           }
-          mark($("app"), s.app_connected ? "ok" : "off", s.app_connected ? "connected" : "not connected");
+          mark($("app"), s.app_connected ? "ok" : "off", s.app_connected ? T.connected : T.notConnected);
           $("bytes").textContent = s.tproxy_bytes ? human(s.tproxy_bytes) : "-";
           const alive = (s.children || []).filter((c) => c.running).length;
-          $("children").textContent = alive ? `${alive} running` : "none";
+          $("children").textContent = alive ? T.childrenRunning(alive) : T.none;
           $("stop").disabled = !s.tunnel;
         } catch (error) {
           fail(String(error.message || error));
@@ -283,7 +358,7 @@
           // `disable` is the manager's own convention, so the module stays off across
           // reboots until it is re-enabled from the manager.
           await sh(`touch ${MODDIR}/disable && pkill -f '/wingsvd$' || true`);
-          $("stophint").textContent = "Module disabled. Reboot to finish.";
+          $("stophint").textContent = T.moduleDisabled;
           refresh();
         } catch (error) {
           fail(String(error.message || error));
