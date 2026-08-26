@@ -52,8 +52,8 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME" >> "$GITHUB_ENV"
           ln -s "$ANDROID_NDK_LATEST_HOME" "$ANDROID_NDK_HOME"
           ./build-module.sh dist
-          sha256sum dist/wingsv-root-module.zip | cut -d' ' -f1 > dist/wingsv-root-module.zip.sha256
           sha512sum dist/wingsv-root-module.zip | cut -d' ' -f1 > dist/wingsv-root-module.zip.sha512
+          sha256sum dist/wingsv-root-module.zip | cut -d' ' -f1 > dist/wingsv-root-module.zip.sha256
 
       - name: Write module-update.json
         run: |
@@ -77,6 +77,6 @@ jobs:
           generate_release_notes: true
           files: |
             dist/wingsv-root-module.zip
-            dist/wingsv-root-module.zip.sha256
             dist/wingsv-root-module.zip.sha512
+            dist/wingsv-root-module.zip.sha256
             dist/module-update.json
