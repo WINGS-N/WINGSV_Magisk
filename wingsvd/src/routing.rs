@@ -292,6 +292,9 @@ pub fn apply_forwarded_redirect(spec: &ForwardedRedirectSpec) {
         );
         // Leave udp/53 to the AP gateway's own dnsmasq: DNS over the dokodemo-door
         // followRedirect path does not survive the udp return trip.
+        //
+        // 67 и 68 отдаём локальному DHCP: завёрнутый запрос до него не доходит
+        // ни хуя, и клиент поднимается без адреса
         run_quiet(
             IPTABLES,
             &[
@@ -305,9 +308,11 @@ pub fn apply_forwarded_redirect(spec: &ForwardedRedirectSpec) {
                 iface,
                 "-p",
                 "udp",
+                "-m",
+                "multiport",
                 "!",
-                "--dport",
-                "53",
+                "--dports",
+                "53,67,68",
                 "-j",
                 "REDIRECT",
                 "--to-ports",
